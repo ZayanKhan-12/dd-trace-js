@@ -14,6 +14,7 @@ const loadChannel = channel('dd-trace:instrumentation:load')
 const partialChannel = channel('dd-trace:test:partial-plugin-activation')
 const nomenclature = require('../../dd-trace/src/service-naming')
 const log = require('../src/log')
+const CompositePlugin = require('../src/plugins/composite')
 const Plugin = require('../src/plugins/plugin')
 
 describe('Plugin Manager', () => {
@@ -33,6 +34,7 @@ describe('Plugin Manager', () => {
   let pluginModuleError
   let partialError
   let disableError
+  let serviceRunning
 
   function makeTracerConfig (overrides = {}) {
     return {
@@ -52,6 +54,7 @@ describe('Plugin Manager', () => {
     pluginModuleError = undefined
     partialError = undefined
     disableError = undefined
+    serviceRunning = false
     tracer = {
       _nomenclature: nomenclature,
     }
@@ -109,6 +112,29 @@ describe('Plugin Manager', () => {
           super.configure(config)
           if (config.enabled) throw partialError
           if (disableError) throw disableError
+        }
+      },
+      composite: class PartialComposite extends CompositePlugin {
+        static id = 'composite'
+        static plugins = {
+          tracing: class Tracing extends Plugin {
+            constructor (...args) {
+              super(...args)
+              serviceRunning = true
+            }
+
+            /** @param {boolean | { enabled: boolean }} config */
+            configure (config) {
+              if (config.enabled === false) serviceRunning = false
+              super.configure(config)
+            }
+          },
+        }
+
+        /** @param {boolean | { enabled: boolean }} config */
+        configure (config) {
+          super.configure(config)
+          if (config.enabled) throw partialError
         }
       },
       graphql: class Graphql extends FakePlugin {
@@ -459,6 +485,20 @@ describe('Plugin Manager', () => {
         await setImmediate()
         assert.strictEqual(partialChannel.hasSubscribers, false)
         sinon.assert.calledWithExactly(errorLog, 'Error activating plugin %s', 'partial', partialError)
+      } finally {
+        errorLog.restore()
+      }
+    })
+
+    it('shuts down composite child services after partial activation fails', async () => {
+      partialError = new Error('composite activation failed')
+      const errorLog = sinon.stub(log, 'error')
+      try {
+        pm.configure(makeTracerConfig())
+        loadChannel.publish({ name: 'composite' })
+        await setImmediate()
+        assert.strictEqual(serviceRunning, false)
+        sinon.assert.calledWithExactly(errorLog, 'Error activating plugin %s', 'composite', partialError)
       } finally {
         errorLog.restore()
       }
